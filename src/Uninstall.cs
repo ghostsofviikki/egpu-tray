@@ -8,8 +8,8 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("eGPU Tray Uninstall")]
 [assembly: AssemblyProduct("eGPU Tray")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 // Uninstall.exe lives in the install folder and is registered in Settings > Apps.
 //   Uninstall.exe        asks first, then removes everything
@@ -19,17 +19,22 @@ using System.Windows.Forms;
 static class UninstallProgram
 {
     const string TempFlag = "/fromtemp";
+    const string TempPrefix = "eGPU-Tray-Uninstall-";
 
     [STAThread]
     static int Main(string[] args)
     {
+        Hardening.Apply();
         bool silent = args.Any(a => a.Equals("/S", StringComparison.OrdinalIgnoreCase));
         bool fromTemp = args.Any(a => a.Equals(TempFlag, StringComparison.OrdinalIgnoreCase));
         string self = Application.ExecutablePath;
 
         if (!fromTemp && self.StartsWith(AppInfo.InstallDir + "\\", StringComparison.OrdinalIgnoreCase))
         {
-            string copy = Path.Combine(Path.GetTempPath(), "eGPU-Tray-Uninstall-" + Guid.NewGuid().ToString("N").Substring(0, 8) + ".exe");
+            // A fresh folder of its own, not %TEMP% itself, where other programs' leftover DLLs could be loaded.
+            string dir = Path.Combine(Path.GetTempPath(), TempPrefix + Guid.NewGuid().ToString("N").Substring(0, 8));
+            Directory.CreateDirectory(dir);
+            string copy = Path.Combine(dir, AppInfo.UninstallerName);
             File.Copy(self, copy);
             var psi = new ProcessStartInfo(copy, (silent ? "/S " : "") + TempFlag);
             psi.UseShellExecute = false;
@@ -61,9 +66,16 @@ static class UninstallProgram
         return code;
     }
 
-    static void DeleteSelfLater(string path)
+    // Removes the temp copy's folder once this process has exited. Only a folder this program created
+    // is ever removed, even if /fromtemp is passed to a copy somewhere else.
+    static void DeleteSelfLater(string self)
     {
-        var psi = new ProcessStartInfo("cmd.exe", "/c ping -n 3 127.0.0.1 >nul & del /f /q \"" + path + "\"");
+        string dir = Path.GetDirectoryName(self);
+        string parent = Path.GetDirectoryName(dir);
+        bool ours = Path.GetFileName(dir).StartsWith(TempPrefix, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(parent.TrimEnd('\\'), Path.GetTempPath().TrimEnd('\\'), StringComparison.OrdinalIgnoreCase);
+        string cmd = ours ? "rmdir /s /q \"" + dir + "\"" : "del /f /q \"" + self + "\"";
+        var psi = new ProcessStartInfo("cmd.exe", "/c ping -n 3 127.0.0.1 >nul & " + cmd);
         psi.CreateNoWindow = true;
         psi.UseShellExecute = false;
         psi.WorkingDirectory = Path.GetTempPath();

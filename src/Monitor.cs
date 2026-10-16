@@ -15,14 +15,15 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("eGPU Tray")]
 [assembly: AssemblyProduct("eGPU Tray")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 static class Program
 {
     [STAThread]
     static int Main(string[] args)
     {
+        Hardening.Apply();
         if (args.Length > 0)
         {
             string a = args[0].ToLowerInvariant();
@@ -32,8 +33,14 @@ static class Program
                     Process.Start(AppInfo.UninstallerExe, string.Join(" ", args.Skip(1)));
                 return 0;
             }
-            if (a == "--eject" && args.Length > 1)   // elevated retry of a disconnect
-                return Cfg.Eject(args[1]) == null ? 0 : 1;
+            // Elevated retry of a disconnect. Only the eGPU itself may be ejected this way, whatever
+            // device ID the command line names.
+            if (a == "--eject" && args.Length > 1)
+            {
+                string gpu = Cfg.FindExternalGpu();
+                if (gpu == null || !gpu.Equals(args[1], StringComparison.OrdinalIgnoreCase)) return 2;
+                return Cfg.Eject(gpu) == null ? 0 : 1;
+            }
         }
 
         bool created;
@@ -47,6 +54,7 @@ static class Program
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
         Application.ThreadException += (s, e) => Log.Write("UI error: " + e.Exception);
+        AppDomain.CurrentDomain.UnhandledException += (s, e) => Log.Write("Crash: " + e.ExceptionObject);
         Application.Run(new TrayApp());
         GC.KeepAlive(mutex);
         return 0;
@@ -154,6 +162,7 @@ class TrayApp : ApplicationContext
     bool blinkPhase, lightTaskbar, exiting;
     string iconKey;
     int promoteTries;
+    Font boldFont;
 
     public TrayApp()
     {
@@ -271,9 +280,11 @@ class TrayApp : ApplicationContext
 
     void BuildMenu(object sender, CancelEventArgs e)
     {
-        menu.Items.Clear();
+        // Rebuilt on every open; dispose the old items so their handles don't pile up.
+        while (menu.Items.Count > 0) menu.Items[0].Dispose();
+        if (boldFont == null) boldFont = new Font(menu.Font, FontStyle.Bold);
         var head = new ToolStripLabel(snap.ShortName + " \u2014 " + snap.StatusText);
-        head.Font = new Font(menu.Font, FontStyle.Bold);
+        head.Font = boldFont;
         menu.Items.Add(head);
         if (snap.State == GpuState.Ready && snap.HasMetrics)
         {
@@ -288,7 +299,7 @@ class TrayApp : ApplicationContext
         menu.Items.Add(new ToolStripSeparator());
 
         var show = new ToolStripMenuItem("Show status", null, delegate { ShowPopup(); });
-        show.Font = new Font(menu.Font, FontStyle.Bold);
+        show.Font = boldFont;
         menu.Items.Add(show);
         var disc = new ToolStripMenuItem("Disconnect eGPU", null, delegate { RequestDisconnect(); });
         disc.Enabled = snap.Present && snap.State != GpuState.Ejecting;
@@ -377,6 +388,8 @@ class StatusPopup : Form
     GpuSnapshot snap = new GpuSnapshot();
     Theme th;
     int anchorBottom = -1;
+    Bitmap headIcon;
+    string headKey;
 
     public StatusPopup()
     {
@@ -518,8 +531,15 @@ class StatusPopup : Form
         var g = e.Graphics;
         g.Clear(th.Bg);
 
-        using (var icon = ChipIcon.Render(D(28), snap.Glyph(false), th.Fg))
-            g.DrawImage(icon, D(P), D(17), icon.Width, icon.Height);
+        // The panel repaints every second while open; only redraw the chip when it changes.
+        string key = snap.Glyph(false) + "|" + th.Fg.ToArgb();
+        if (key != headKey)
+        {
+            if (headIcon != null) headIcon.Dispose();
+            headIcon = ChipIcon.Render(D(28), snap.Glyph(false), th.Fg);
+            headKey = key;
+        }
+        g.DrawImage(headIcon, D(P), D(17), headIcon.Width, headIcon.Height);
         TextRenderer.DrawText(g, snap.Name, fTitle, new Rectangle(D(56), D(12), D(W - 56 - P), D(24)), th.Fg,
             TextFormatFlags.Left | TextFormatFlags.VerticalCenter | TextFormatFlags.EndEllipsis);
 

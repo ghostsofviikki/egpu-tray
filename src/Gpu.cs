@@ -115,8 +115,11 @@ class GpuMonitor
     readonly AutoResetEvent wake = new AutoResetEvent(false);
     volatile bool stop, ejecting;
     volatile string deviceId;
-    bool nvUp, first = true;
+    bool nvUp, nvTried, first = true;
     GpuCounters counters;
+    string infoId;        // device the cached VRAM size and PCI location belong to
+    ulong memTotal;
+    uint pciBus, pciDev;
     GpuState state = GpuState.Absent;
     DateTime since = DateTime.Now;
     string lastName = LoadName();
@@ -175,6 +178,7 @@ class GpuMonitor
     void Release()
     {
         if (nvUp) { Nvml.Shutdown(); nvUp = false; }
+        nvTried = false;
         if (counters != null) { counters.Dispose(); counters = null; }
     }
 
@@ -217,6 +221,12 @@ class GpuMonitor
             if (!first) Log.Write("eGPU detected");
         }
         RememberName(Cfg.GetDescription(id));
+        if (id != infoId || memTotal == 0)   // the driver writes the VRAM size only once it has started
+        {
+            infoId = id;
+            memTotal = Cfg.GetVramTotal(id);
+            Cfg.GetPciLocation(id, out pciBus, out pciDev);
+        }
         s.Name = lastName;
         s.Present = true;
         s.Problem = problem;
@@ -258,7 +268,13 @@ class GpuMonitor
 
                         if (s.Vendor == "NVIDIA")
                         {
-                            if (!nvUp) nvUp = Nvml.Init();
+                            // One attempt per connection: NVML is slow to load and absent on some drivers.
+                            if (!nvUp && !nvTried)
+                            {
+                                nvTried = true;
+                                nvUp = Nvml.Init(pciBus, pciDev);
+                                if (!nvUp) Log.Write("NVML unavailable for this card; power draw won't be shown");
+                            }
                             double w;
                             uint t;
                             if (nvUp && Nvml.Query(out w, out t))
@@ -275,7 +291,7 @@ class GpuMonitor
 
             if (ok)
             {
-                s.MemTotal = Cfg.GetVramTotal(id);
+                s.MemTotal = memTotal;
                 uint gen, width;
                 if (Cfg.GetPcieLink(id, out gen, out width)) { s.PcieGen = gen; s.PcieWidth = width; }
                 if (pids != null) s.Apps = ProcessNames(pids);
@@ -303,13 +319,15 @@ class GpuMonitor
         return s;
     }
 
+    static readonly int SelfPid = GetSelfPid();
+    static int GetSelfPid() { using (var p = Process.GetCurrentProcess()) return p.Id; }
+
     static List<string> ProcessNames(List<uint> pids)
     {
-        int self = Process.GetCurrentProcess().Id;
         var names = new List<string>();
         foreach (uint pid in pids.Distinct())
         {
-            if (pid == self || pid <= 4) continue;   // 0 = Idle, 4 = System (the kernel itself)
+            if (pid == SelfPid || pid <= 4) continue;   // 0 = Idle, 4 = System (the kernel itself)
             try
             {
                 using (var p = Process.GetProcessById((int)pid))
@@ -325,17 +343,16 @@ class GpuMonitor
     }
 
     // Asks Windows to release the eGPU (like "Safely Remove Hardware"). done(null) on success.
+    // Called on the UI thread only, so the check-and-set of ejecting can't race with another click.
     public void Eject(Action<string> done)
     {
         string id = deviceId;
         if (id == null) { done("The eGPU is not connected."); return; }
+        if (ejecting) return;
+        ejecting = true;   // set before queuing: a snapshot arriving now must not re-enable Disconnect
         ThreadPool.QueueUserWorkItem(delegate
         {
-            lock (gate)
-            {
-                ejecting = true;
-                Release();   // our own handles must not block removal
-            }
+            lock (gate) Release();   // our own handles must not block removal
             Wake();
             Log.Write("Disconnect requested");
             string err;
@@ -363,7 +380,8 @@ class GpuMonitor
             psi.UseShellExecute = true;
             using (var p = Process.Start(psi))
             {
-                p.WaitForExit();
+                // Don't wait forever: the icon would keep blinking "disconnecting".
+                if (!p.WaitForExit(120000)) return "Windows didn't answer the disconnect request. Try again.";
                 return p.ExitCode == 0 ? null : "Windows refused to release the eGPU. Close apps using the GPU and try again.";
             }
         }
@@ -381,7 +399,8 @@ static class Cfg
     static readonly Guid PciDeviceProps = new Guid("3AB22E31-8264-4b4e-9AF5-A8D2D8E33E62");    // DEVPKEY_PciDevice_*
     const uint FILTER_PRESENT = 0x100, FILTER_CLASS = 0x200;
     const uint DN_HAS_PROBLEM = 0x400;
-    const uint DRP_DEVICEDESC = 0x01, DRP_DRIVER = 0x0A, DRP_FRIENDLYNAME = 0x0D, DRP_CAPABILITIES = 0x10;
+    const uint DRP_DEVICEDESC = 0x01, DRP_DRIVER = 0x0A, DRP_FRIENDLYNAME = 0x0D, DRP_CAPABILITIES = 0x10,
+               DRP_BUSNUMBER = 0x16, DRP_ADDRESS = 0x1D;
     const uint CAP_REMOVABLE = 0x4;
     const int CR_ACCESS_DENIED = 0x33;
 
@@ -489,6 +508,17 @@ static class Cfg
         }
         catch { }
         return 0;
+    }
+
+    // PCI bus and device number, used to pick the same card in NVML.
+    public static bool GetPciLocation(string id, out uint bus, out uint device)
+    {
+        bus = device = 0;
+        uint dev, addr;
+        if (CM_Locate_DevNodeW(out dev, id, 0) != 0) return false;
+        if (!GetDword(dev, DRP_BUSNUMBER, out bus) || !GetDword(dev, DRP_ADDRESS, out addr)) return false;
+        device = addr >> 16;   // PCI address: device << 16 | function
+        return true;
     }
 
     public static bool GetPcieLink(string id, out uint gen, out uint width)
@@ -714,43 +744,54 @@ class GpuCounters : IDisposable
 
 static class Nvml
 {
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern IntPtr LoadLibraryW(string path);
+    // nvml.dll is loaded from System32 only (see DefaultDllImportSearchPaths in Shared.cs).
     [DllImport("nvml.dll")] static extern int nvmlInit_v2();
     [DllImport("nvml.dll")] static extern int nvmlShutdown();
     [DllImport("nvml.dll")] static extern int nvmlDeviceGetCount_v2(out uint count);
     [DllImport("nvml.dll")] static extern int nvmlDeviceGetHandleByIndex_v2(uint index, out IntPtr dev);
+    [DllImport("nvml.dll")] static extern int nvmlDeviceGetPciInfo_v3(IntPtr dev, out PciInfo pci);
     [DllImport("nvml.dll")] static extern int nvmlDeviceGetTemperature(IntPtr dev, int sensor, out uint t);
     [DllImport("nvml.dll")] static extern int nvmlDeviceGetPowerUsage(IntPtr dev, out uint milliwatts);
 
-    static bool preloaded;
-    static IntPtr dev;
-
-    static void Preload()
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi)]
+    struct PciInfo
     {
-        if (preloaded) return;
-        preloaded = true;
-        string sys = Path.Combine(Environment.SystemDirectory, "nvml.dll");
-        if (File.Exists(sys)) LoadLibraryW(sys);
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 16)] public string BusIdLegacy;
+        public uint Domain, Bus, Device, PciDeviceId, PciSubSystemId;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)] public string BusId;
     }
 
-    public static bool Init()
+    static IntPtr dev;
+
+    // Finds the eGPU among NVML's devices by PCI location, so a laptop's own NVIDIA GPU isn't read instead.
+    public static bool Init(uint bus, uint device)
     {
-        Preload();
         try
         {
             if (nvmlInit_v2() != 0) return false;
-            uint n;
-            IntPtr d;
-            if (nvmlDeviceGetCount_v2(out n) != 0 || n == 0 || nvmlDeviceGetHandleByIndex_v2(0, out d) != 0)
-            {
-                nvmlShutdown();
-                return false;
-            }
-            dev = d;
-            return true;
         }
         catch (DllNotFoundException) { return false; }
         catch (EntryPointNotFoundException) { return false; }
+
+        try
+        {
+            uint n;
+            if (nvmlDeviceGetCount_v2(out n) == 0)
+                for (uint i = 0; i < n; i++)
+                {
+                    IntPtr d;
+                    PciInfo pci;
+                    if (nvmlDeviceGetHandleByIndex_v2(i, out d) == 0 && nvmlDeviceGetPciInfo_v3(d, out pci) == 0 &&
+                        pci.Bus == bus && pci.Device == device)
+                    {
+                        dev = d;
+                        return true;
+                    }
+                }
+        }
+        catch (EntryPointNotFoundException) { }
+        nvmlShutdown();
+        return false;
     }
 
     public static void Shutdown()

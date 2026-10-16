@@ -2,14 +2,18 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
+// P/Invoke DLLs (cfgmgr32, pdh, nvml...) load from System32 only.
+[assembly: DefaultDllImportSearchPaths(DllImportSearchPath.System32)]
+
 static class AppInfo
 {
     public const string Name = "eGPU Tray";
-    public const string Version = "1.0.0";
+    public const string Version = "1.0.1";
     public const string ExeName = "eGPUTray.exe";
     public const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     public const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\eGPUTray";
@@ -28,6 +32,21 @@ static class AppInfo
     public static string StartMenuLink
     {
         get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), Name + ".lnk"); }
+    }
+}
+
+// DLL-planting protection. Setup runs from Downloads and the uninstaller from %TEMP%, folders that
+// can hold stray DLLs; load Windows DLLs from System32 only, never from the exe's or current folder.
+static class Hardening
+{
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] static extern bool SetDllDirectoryW(string path);
+    [DllImport("kernel32.dll")] static extern bool SetDefaultDllDirectories(uint flags);
+    const uint LOAD_LIBRARY_SEARCH_SYSTEM32 = 0x800;
+
+    public static void Apply()
+    {
+        try { SetDllDirectoryW(""); } catch { }   // drops the current directory from the search order
+        try { SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32); } catch { }
     }
 }
 
@@ -124,19 +143,24 @@ static class Installer
         }
     }
 
+    // Writes next to the target first and swaps it in, so a failed update never leaves a half-written exe.
     static void WriteFile(string path, Stream data)
     {
+        string tmp = path + ".new";
+        using (var f = File.Create(tmp)) data.CopyTo(f);
         for (int i = 0; ; i++)
         {
             try
             {
-                using (var f = File.Create(path)) data.CopyTo(f);
+                if (File.Exists(path)) File.Replace(tmp, path, null);
+                else File.Move(tmp, path);
                 return;
             }
-            catch (IOException)
+            catch (Exception ex)
             {
-                if (i >= 10) throw;
-                Thread.Sleep(500);
+                if (!(ex is IOException || ex is UnauthorizedAccessException)) throw;
+                if (i >= 10) { try { File.Delete(tmp); } catch { } throw; }
+                Thread.Sleep(500);   // the old exe can stay locked for a moment after it exits
             }
         }
     }

@@ -7,8 +7,8 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("eGPU Tray Setup")]
 [assembly: AssemblyProduct("eGPU Tray")]
-[assembly: AssemblyVersion("1.0.0.0")]
-[assembly: AssemblyFileVersion("1.0.0.0")]
+[assembly: AssemblyVersion("1.0.1.0")]
+[assembly: AssemblyFileVersion("1.0.1.0")]
 
 // Setup.exe carries eGPUTray.exe as an embedded resource.
 //   eGPU-Tray-Setup.exe        interactive install
@@ -18,6 +18,7 @@ static class SetupProgram
     [STAThread]
     static int Main(string[] args)
     {
+        Hardening.Apply();
         if (args.Any(a => a.Equals("/S", StringComparison.OrdinalIgnoreCase)))
         {
             try { Run(true, true); return 0; }
