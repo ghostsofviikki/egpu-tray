@@ -1,0 +1,4 @@
+# Build output (recreate with build.ps1)
+build/
+dist/
+*.log
