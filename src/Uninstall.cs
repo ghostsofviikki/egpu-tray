@@ -8,8 +8,8 @@ using System.Windows.Forms;
 
 [assembly: AssemblyTitle("eGPU Tray Uninstall")]
 [assembly: AssemblyProduct("eGPU Tray")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 // Uninstall.exe lives in the install folder and is registered in Settings > Apps.
 //   Uninstall.exe        asks first, then removes everything

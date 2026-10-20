@@ -21,7 +21,7 @@ $common = @('/nologo', '/optimize+', '/platform:x64', '/target:winexe', '/codepa
     "/win32manifest:$src\app.manifest", "/win32icon:$ico",
     '/r:System.dll', '/r:System.Core.dll', '/r:System.Drawing.dll', '/r:System.Windows.Forms.dll')
 
-& $csc @common "/out:$build\eGPUTray.exe" "$src\Monitor.cs" "$src\Gpu.cs" "$src\Shared.cs" "$src\ChipIcon.cs"
+& $csc @common "/out:$build\eGPUTray.exe" "$src\Monitor.cs" "$src\Gpu.cs" "$src\OnConnect.cs" "$src\Shared.cs" "$src\ChipIcon.cs"
 if ($LASTEXITCODE) { throw 'App build failed' }
 
 & $csc @common "/out:$build\Uninstall.exe" "$src\Uninstall.cs" "$src\Shared.cs" "$src\ChipIcon.cs"

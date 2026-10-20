@@ -13,7 +13,7 @@ using Microsoft.Win32;
 static class AppInfo
 {
     public const string Name = "eGPU Tray";
-    public const string Version = "1.0.1";
+    public const string Version = "1.1.0";
     public const string ExeName = "eGPUTray.exe";
     public const string RunKey = @"Software\Microsoft\Windows\CurrentVersion\Run";
     public const string UninstallKey = @"Software\Microsoft\Windows\CurrentVersion\Uninstall\eGPUTray";
