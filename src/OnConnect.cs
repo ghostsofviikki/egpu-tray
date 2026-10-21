@@ -50,21 +50,44 @@ static class ConnectAction
         }
     }
 
+    const int ExitWaitMs = 30000;
+    // Seconds to wait before each retry. For a while after the eGPU connects, schtasks can fail
+    // ("cannot find the file specified") even though the task exists.
+    static readonly int[] RetryDelays = { 10, 20, 30, 60, 60 };
+    static int running;
+
+    // Set when every attempt failed; the tray runs it again when the session is next unlocked.
+    public static volatile bool Pending;
+
     // Runs the saved program in the background; failures only go to the log.
     public static void Run()
     {
         string program, args;
         Load(out program, out args);
         if (program.Length == 0) return;
+        if (Interlocked.Exchange(ref running, 1) == 1) return;   // already running or retrying
+        Pending = false;
         ThreadPool.QueueUserWorkItem(delegate
         {
-            string err = Start(program, args);
-            Log.Write(err == null ? "Ran on-connect program: " + program : "On-connect program failed: " + err);
+            try
+            {
+                int attempts = RetryDelays.Length + 1;
+                for (int i = 1; i <= attempts; i++)
+                {
+                    string err = Start(program, args, true);
+                    if (err == null) { Log.Write("Ran on-connect program: " + program); return; }
+                    Log.Write("On-connect program failed (attempt " + i + " of " + attempts + "): " + err);                    if (i < attempts) Thread.Sleep(RetryDelays[i - 1] * 1000);
+                }
+                Pending = true;
+                Log.Write("On-connect program will be retried when Windows is next unlocked");
+            }
+            finally { Interlocked.Exchange(ref running, 0); }
         });
     }
 
-    // Returns null on success or a human-readable reason.
-    public static string Start(string program, string args)
+    // Returns null on success or a human-readable reason. With wait, a program started directly is
+    // waited for (up to 30 s) and a non-zero exit code counts as a failure.
+    public static string Start(string program, string args, bool wait = false)
     {
         try
         {
@@ -75,9 +98,23 @@ static class ConnectAction
                 // Started directly so console tools such as schtasks don't flash a window.
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
-                try { using (Process.Start(psi)) { } return null; }
+                psi.RedirectStandardOutput = psi.RedirectStandardError = wait;
+                try
+                {
+                    using (var p = Process.Start(psi))
+                    {
+                        if (!wait) return null;
+                        var output = p.StandardOutput.ReadToEndAsync();
+                        var errors = p.StandardError.ReadToEndAsync();
+                        if (!p.WaitForExit(ExitWaitMs)) return null;   // still running, e.g. a GUI program
+                        if (p.ExitCode == 0) return null;
+                        string text = (errors.Result.Trim() + " " + output.Result.Trim()).Trim();
+                        return "exit code " + p.ExitCode + (text.Length > 0 ? ": " + text : "");
+                    }
+                }
                 catch (Win32Exception ex) { if (ex.NativeErrorCode != 740) throw; }   // ERROR_ELEVATION_REQUIRED
                 psi.CreateNoWindow = false;
+                psi.RedirectStandardOutput = psi.RedirectStandardError = false;
             }
             psi.UseShellExecute = true;   // .bat, .lnk, or an exe that needs admin rights (Windows asks first)
             using (Process.Start(psi)) { }
@@ -177,10 +214,24 @@ class ConnectActionForm : Form
     {
         string p = program.Text.Trim();
         if (p.Length == 0) { status.Text = "Enter a program first."; return; }
+        string a = args.Text.Trim();
         UseWaitCursor = true;
-        string err = ConnectAction.Start(p, args.Text.Trim());
-        UseWaitCursor = false;
-        status.Text = err == null ? "Started." : "Couldn't start it: " + err;
+        status.Text = "Running…";
+        // Waits for the exit code off the UI thread, so a failing schtasks shows its error here.
+        ThreadPool.QueueUserWorkItem(delegate
+        {
+            string err = ConnectAction.Start(p, a, true);
+            Log.Write(err == null ? "Run now: " + p : "Run now failed: " + err);
+            try
+            {
+                BeginInvoke((Action)(() =>
+                {
+                    UseWaitCursor = false;
+                    status.Text = err == null ? "Started." : "Couldn't start it: " + err;
+                }));
+            }
+            catch (InvalidOperationException) { }   // window already closed
+        });
     }
 
     void OnSave(object sender, EventArgs e)

@@ -190,6 +190,7 @@ class TrayApp : ApplicationContext
         msgs.DeviceChanged += () => mon.Wake();
         SystemEvents.UserPreferenceChanged += OnPreferenceChanged;
         SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
+        SystemEvents.SessionSwitch += OnSessionSwitch;
 
         mon.Updated += s =>
         {
@@ -274,6 +275,12 @@ class TrayApp : ApplicationContext
     }
 
     void OnDisplayChanged(object sender, EventArgs e) { iconKey = null; RefreshIcon(); }
+
+    void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
+    {
+        if (e.Reason == SessionSwitchReason.SessionUnlock && ConnectAction.Pending && wasReady)
+            ConnectAction.Run();
+    }
 
     void TogglePopup()
     {
@@ -382,6 +389,7 @@ class TrayApp : ApplicationContext
         Log.Write("eGPU Tray exiting");
         SystemEvents.UserPreferenceChanged -= OnPreferenceChanged;
         SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
+        SystemEvents.SessionSwitch -= OnSessionSwitch;
         mon.Stop();
         connected.Stop();
         if (actionForm != null) actionForm.Close();
