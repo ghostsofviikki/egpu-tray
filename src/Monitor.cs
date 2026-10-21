@@ -15,8 +15,8 @@ using Microsoft.Win32;
 
 [assembly: AssemblyTitle("eGPU Tray")]
 [assembly: AssemblyProduct("eGPU Tray")]
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
 
 static class Program
 {
@@ -155,14 +155,16 @@ class TrayApp : ApplicationContext
     readonly MsgWindow msgs = new MsgWindow();
     readonly System.Windows.Forms.Timer blink = new System.Windows.Forms.Timer();
     readonly System.Windows.Forms.Timer promote = new System.Windows.Forms.Timer();
+    readonly System.Windows.Forms.Timer connected = new System.Windows.Forms.Timer();
     readonly Dictionary<string, Icon> icons = new Dictionary<string, Icon>();
     readonly EventWaitHandle showEv = new EventWaitHandle(false, EventResetMode.AutoReset, AppInfo.ShowEvent);
     readonly EventWaitHandle exitEv = new EventWaitHandle(false, EventResetMode.AutoReset, AppInfo.ExitEvent);
     GpuSnapshot snap = new GpuSnapshot();
-    bool blinkPhase, lightTaskbar, exiting;
+    bool blinkPhase, lightTaskbar, exiting, wasReady;
     string iconKey;
     int promoteTries;
     Font boldFont;
+    ConnectActionForm actionForm;
 
     public TrayApp()
     {
@@ -179,6 +181,11 @@ class TrayApp : ApplicationContext
 
         blink.Interval = 600;
         blink.Tick += delegate { blinkPhase = !blinkPhase; RefreshIcon(); };
+
+        // Runs the on-connect program only once the eGPU has stayed ready for a moment, so a card
+        // that drops straight back out doesn't trigger it, and other tools see the driver as up.
+        connected.Interval = 3000;
+        connected.Tick += delegate { connected.Stop(); ConnectAction.Run(); };
 
         msgs.DeviceChanged += () => mon.Wake();
         SystemEvents.UserPreferenceChanged += OnPreferenceChanged;
@@ -219,6 +226,10 @@ class TrayApp : ApplicationContext
         snap = s;
         bool animate = s.State == GpuState.Starting || s.State == GpuState.Ejecting;
         if (animate != blink.Enabled) { blink.Enabled = animate; blinkPhase = false; }
+        bool ready = s.State == GpuState.Ready;
+        if (ready && !wasReady) connected.Start();
+        else if (!ready) connected.Stop();
+        wasReady = ready;
         RefreshIcon();
         tray.Text = Clip(TooltipText(s), 63);
         if (popup.Visible) popup.SetSnapshot(s);
@@ -310,12 +321,24 @@ class TrayApp : ApplicationContext
         auto.Checked = Installer.GetAutostart();
         auto.Click += delegate { Installer.SetAutostart(!auto.Checked, Application.ExecutablePath); };
         menu.Items.Add(auto);
+        var onConnect = new ToolStripMenuItem("Run when connected…", null, delegate { ShowConnectAction(); });
+        onConnect.Checked = ConnectAction.IsSet;
+        menu.Items.Add(onConnect);
         menu.Items.Add(new ToolStripMenuItem("Open log", null, delegate
         {
             if (File.Exists(Log.FilePath)) Process.Start("notepad.exe", "\"" + Log.FilePath + "\"");
         }));
         menu.Items.Add(new ToolStripMenuItem("Exit", null, delegate { ExitApp(); }));
         e.Cancel = false;
+    }
+
+    void ShowConnectAction()
+    {
+        if (actionForm != null) { actionForm.Activate(); return; }
+        actionForm = new ConnectActionForm();
+        actionForm.FormClosed += delegate { actionForm.Dispose(); actionForm = null; };
+        actionForm.Show();
+        actionForm.Activate();
     }
 
     void RequestDisconnect()
@@ -360,6 +383,8 @@ class TrayApp : ApplicationContext
         SystemEvents.UserPreferenceChanged -= OnPreferenceChanged;
         SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
         mon.Stop();
+        connected.Stop();
+        if (actionForm != null) actionForm.Close();
         tray.Visible = false;
         tray.Dispose();
         msgs.DestroyHandle();
