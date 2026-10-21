@@ -13,7 +13,7 @@ Click the icon for GPU usage, VRAM, temperature, power, fan and PCIe link, the a
 
 ## Run a program when the eGPU connects
 
-*Run when connected…* runs a program each time the eGPU is plugged in and has been ready for 3 seconds (and once at start-up if it is already connected). Use it to re-apply an undervolt or power limit, since the card resets to stock whenever it reconnects. The result is written to the log.
+*Run when connected…* runs a program each time the eGPU is plugged in and has been ready for 3 seconds (and once at start-up if it is already connected). Use it to re-apply an undervolt or power limit, since the card resets to stock whenever it reconnects. A program that exits with an error (for example `schtasks` in the first moments after the eGPU connects) is retried for about 3 minutes, and once more the next time Windows is unlocked. The result, including the exit code and message on failure, is written to the log.
 
 MSI Afterburner needs admin rights, so starting it directly brings up a UAC prompt every time. Instead, create an elevated scheduled task once, from an admin PowerShell:
 
