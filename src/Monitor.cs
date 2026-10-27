@@ -191,6 +191,7 @@ class TrayApp : ApplicationContext
         SystemEvents.UserPreferenceChanged += OnPreferenceChanged;
         SystemEvents.DisplaySettingsChanged += OnDisplayChanged;
         SystemEvents.SessionSwitch += OnSessionSwitch;
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
 
         mon.Updated += s =>
         {
@@ -276,10 +277,32 @@ class TrayApp : ApplicationContext
 
     void OnDisplayChanged(object sender, EventArgs e) { iconKey = null; RefreshIcon(); }
 
+    // The card can drop back to stock after sleep or Modern Standby without ever disconnecting, so the
+    // on-connect program runs again on resume and on unlock (waking from Modern Standby ends at the
+    // lock screen, and no resume event is sent for it). Also covers a failed run that is still pending.
     void OnSessionSwitch(object sender, SessionSwitchEventArgs e)
     {
-        if (e.Reason == SessionSwitchReason.SessionUnlock && ConnectAction.Pending && wasReady)
-            ConnectAction.Run();
+        if (e.Reason == SessionSwitchReason.SessionUnlock) RunAgain("unlock");
+    }
+
+    void OnPowerModeChanged(object sender, PowerModeChangedEventArgs e)
+    {
+        if (e.Mode == PowerModes.Resume) RunAgain("resume");
+    }
+
+    void RunAgain(string reason)
+    {
+        try
+        {
+            popup.BeginInvoke((Action)(() =>
+            {
+                if (exiting || !wasReady || !ConnectAction.IsSet) return;
+                Log.Write("Running on-connect program again after " + reason);
+                connected.Stop();
+                connected.Start();
+            }));
+        }
+        catch { }
     }
 
     void TogglePopup()
@@ -390,6 +413,7 @@ class TrayApp : ApplicationContext
         SystemEvents.UserPreferenceChanged -= OnPreferenceChanged;
         SystemEvents.DisplaySettingsChanged -= OnDisplayChanged;
         SystemEvents.SessionSwitch -= OnSessionSwitch;
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         mon.Stop();
         connected.Stop();
         if (actionForm != null) actionForm.Close();

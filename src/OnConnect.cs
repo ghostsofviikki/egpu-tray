@@ -56,9 +56,6 @@ static class ConnectAction
     static readonly int[] RetryDelays = { 10, 20, 30, 60, 60 };
     static int running;
 
-    // Set when every attempt failed; the tray runs it again when the session is next unlocked.
-    public static volatile bool Pending;
-
     // Runs the saved program in the background; failures only go to the log.
     public static void Run()
     {
@@ -66,7 +63,6 @@ static class ConnectAction
         Load(out program, out args);
         if (program.Length == 0) return;
         if (Interlocked.Exchange(ref running, 1) == 1) return;   // already running or retrying
-        Pending = false;
         ThreadPool.QueueUserWorkItem(delegate
         {
             try
@@ -76,9 +72,9 @@ static class ConnectAction
                 {
                     string err = Start(program, args, true);
                     if (err == null) { Log.Write("Ran on-connect program: " + program); return; }
-                    Log.Write("On-connect program failed (attempt " + i + " of " + attempts + "): " + err);                    if (i < attempts) Thread.Sleep(RetryDelays[i - 1] * 1000);
+                    Log.Write("On-connect program failed (attempt " + i + " of " + attempts + "): " + err);
+                    if (i < attempts) Thread.Sleep(RetryDelays[i - 1] * 1000);
                 }
-                Pending = true;
                 Log.Write("On-connect program will be retried when Windows is next unlocked");
             }
             finally { Interlocked.Exchange(ref running, 0); }
